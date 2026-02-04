@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+licenses.db
+.DS_Store
+.fly/
+fly.toml
