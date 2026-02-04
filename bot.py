@@ -4,14 +4,13 @@ from discord.ext import commands, tasks
 import os
 import base64
 import time
-import json
 import secrets
 import string
 import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from aiohttp import web
-from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # Load environment variables
 load_dotenv()
@@ -25,30 +24,26 @@ CUSTOMER_ROLE_ID = 1456538123629494335 # Customer Role ID
 OWNER_ROLE_ID = 1456538170869944414 # Owner Role ID
 
 # VERSION INFO (Update these when pushing new script)
-SCRIPT_VERSION = "2.2.0"  # Bumped version for MongoDB update
-LAST_UPDATE = "February 04, 2026 4:45 PM EST"
+SCRIPT_VERSION = "2.3.0"  # Bumped version for async MongoDB
+LAST_UPDATE = "February 04, 2026 5:20 PM EST"
 CHANGELOG = [
-    "Migrated database to MongoDB (Cloud Persistent)",
-    "Fixed persistent storage issues on free hosting",
-    "Optimized license lookup speed"
+    "Switched to async MongoDB driver (Motor)",
+    "Fixed command timeout issues",
+    "Improved responsiveness"
 ]
 
 # ==============================================================================
-# MONGODB SETUP
+# MONGODB SETUP (Async with Motor)
 # ==============================================================================
 if not MONGODB_URI:
     print("Warning: MONGODB_URI not found in .env. Bot will fail to connect to DB.")
 
-# Initialize MongoDB Client
-try:
-    # Use tls=true without certifi to avoid SSL issues on some platforms
-    mongo_client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
-    db = mongo_client['pxhb_bot']
-    licenses_col = db['licenses']
-    sellers_col = db['sellers']
-    print("[System] Connected to MongoDB Atlas successfully!")
-except Exception as e:
-    print(f"[System] Failed to connect to MongoDB: {e}")
+# Initialize MongoDB Client (Motor - Async)
+mongo_client = AsyncIOMotorClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
+db = mongo_client['pxhb_bot']
+licenses_col = db['licenses']
+sellers_col = db['sellers']
+print("[System] MongoDB client initialized (async)")
 
 # ==============================================================================
 # ROLE HELPERS
@@ -60,7 +55,7 @@ async def check_and_update_role(guild, user_id):
         user_id_str = str(user_id)
         
         # Check for any active, non-expired license
-        active_license = licenses_col.find_one({
+        active_license = await licenses_col.find_one({
             "discord_id": user_id_str,
             "status": {"$ne": "revoked"},
             "expires_at": {"$gt": current_time}
@@ -130,7 +125,7 @@ async def handle_activation(request):
             return web.json_response({'success': False, 'error': 'Missing key or hwid'}, status=400)
         
         # Update database
-        result = licenses_col.update_one(
+        result = await licenses_col.update_one(
             {"key": key, "status": "pending"},
             {"$set": {"hwid": hwid, "status": "active", "activated_at": int(time.time())}}
         )
@@ -166,7 +161,7 @@ async def check_expirations():
     print("[Task] Checking for license expirations...")
     try:
         # Get all unique discord IDs in the database
-        users = licenses_col.distinct("discord_id")
+        users = await licenses_col.distinct("discord_id")
             
         for guild in bot.guilds:
             for user_id in users:
@@ -187,7 +182,7 @@ async def is_seller(interaction: discord.Interaction):
     if is_owner(interaction):
         return True
     
-    seller = sellers_col.find_one({"discord_id": str(interaction.user.id)})
+    seller = await sellers_col.find_one({"discord_id": str(interaction.user.id)})
     return seller is not None
 
 # ==============================================================================
@@ -202,7 +197,7 @@ async def addseller(interaction: discord.Interaction, user: discord.Member):
         return
         
     try:
-        sellers_col.update_one(
+        await sellers_col.update_one(
             {"discord_id": str(user.id)},
             {"$set": {"discord_name": str(user), "added_at": int(time.time())}},
             upsert=True
@@ -219,7 +214,7 @@ async def removeseller(interaction: discord.Interaction, user: discord.User):
         return
         
     try:
-        result = sellers_col.delete_one({"discord_id": str(user.id)})
+        result = await sellers_col.delete_one({"discord_id": str(user.id)})
             
         if result.deleted_count > 0:
             await interaction.response.send_message(f"✅ Removed {user.mention} from authorized sellers.", ephemeral=True)
@@ -255,7 +250,7 @@ async def genkey(interaction: discord.Interaction, user: discord.User, days: int
             "expires_at": expiry,
             "last_hwid_reset": 0
         }
-        licenses_col.insert_one(doc)
+        await licenses_col.insert_one(doc)
         
         # Add Customer Role immediately
         await check_and_update_role(interaction.guild, user.id)
@@ -299,7 +294,7 @@ async def userinfo(interaction: discord.Interaction, user: discord.User):
     try:
         # Find all licenses for user
         cursor = licenses_col.find({"discord_id": str(user.id)}).sort("created_at", -1)
-        licenses = list(cursor)
+        licenses = await cursor.to_list(length=50)
         
         if not licenses:
             await interaction.followup.send(f"{user.mention} has no licenses.", ephemeral=True)
@@ -337,7 +332,7 @@ async def revoke(interaction: discord.Interaction, user: discord.User):
     await interaction.response.defer(ephemeral=True)
     
     try:
-        result = licenses_col.update_many(
+        result = await licenses_col.update_many(
             {"discord_id": str(user.id), "status": {"$ne": "revoked"}},
             {"$set": {"status": "revoked"}}
         )
@@ -363,10 +358,10 @@ async def stats(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     
     try:
-        total = licenses_col.count_documents({})
-        active = licenses_col.count_documents({"status": "active"})
-        pending = licenses_col.count_documents({"status": "pending"})
-        revoked = licenses_col.count_documents({"status": "revoked"})
+        total = await licenses_col.count_documents({})
+        active = await licenses_col.count_documents({"status": "active"})
+        pending = await licenses_col.count_documents({"status": "pending"})
+        revoked = await licenses_col.count_documents({"status": "revoked"})
         
         embed = discord.Embed(title="License Statistics", color=0x5865F2)
         embed.add_field(name="Total Keys", value=str(total), inline=True)
@@ -394,9 +389,6 @@ async def help_command(interaction: discord.Interaction):
         
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# Note: Backup command removed as downloading a .db file is no longer relevant for MongoDB
-# You can use MongoDB Compass or Atlas UI to export data if needed.
-
 # ==============================================================================
 # INTERACTIVE PANEL (Replaces Web Portal)
 # ==============================================================================
@@ -412,7 +404,7 @@ class PanelView(discord.ui.View):
             current_time = int(time.time())
             
             cursor = licenses_col.find({"discord_id": user_id}).sort("created_at", -1)
-            licenses = list(cursor)
+            licenses = await cursor.to_list(length=50)
             
             if not licenses:
                 embed = discord.Embed(
@@ -450,7 +442,7 @@ class PanelView(discord.ui.View):
             current_time = int(time.time())
             
             # Find active license
-            license_doc = licenses_col.find_one({
+            license_doc = await licenses_col.find_one({
                 "discord_id": user_id,
                 "status": {"$ne": "revoked"},
                 "expires_at": {"$gt": current_time}
@@ -488,14 +480,14 @@ class PanelView(discord.ui.View):
             user_id = str(interaction.user.id)
             current_time = int(time.time())
             
-            total = licenses_col.count_documents({"discord_id": user_id})
-            active = licenses_col.count_documents({
+            total = await licenses_col.count_documents({"discord_id": user_id})
+            active = await licenses_col.count_documents({
                 "discord_id": user_id, 
                 "status": "active", 
                 "expires_at": {"$gt": current_time}
             })
             
-            latest = licenses_col.find_one(
+            latest = await licenses_col.find_one(
                 {"discord_id": user_id, "expires_at": {"$gt": current_time}},
                 sort=[("expires_at", -1)]
             )
@@ -529,7 +521,7 @@ class PanelView(discord.ui.View):
             cooldown_seconds = cooldown_days * 24 * 60 * 60
             
             # Find most recent active license
-            license_doc = licenses_col.find_one({
+            license_doc = await licenses_col.find_one({
                 "discord_id": user_id,
                 "status": {"$ne": "revoked"},
                 "expires_at": {"$gt": current_time}
@@ -560,7 +552,7 @@ class PanelView(discord.ui.View):
                 return
             
             # Perform reset
-            licenses_col.update_one(
+            await licenses_col.update_one(
                 {"_id": license_doc["_id"]},
                 {"$set": {"hwid": "UNBOUND", "last_hwid_reset": current_time}}
             )
