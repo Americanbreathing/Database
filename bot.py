@@ -12,7 +12,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 from aiohttp import web
 from pymongo import MongoClient
-import certifi
 
 # Load environment variables
 load_dotenv()
@@ -42,7 +41,8 @@ if not MONGODB_URI:
 
 # Initialize MongoDB Client
 try:
-    mongo_client = MongoClient(MONGODB_URI, tlsCAFile=certifi.where())
+    # Use tls=true without certifi to avoid SSL issues on some platforms
+    mongo_client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
     db = mongo_client['pxhb_bot']
     licenses_col = db['licenses']
     sellers_col = db['sellers']
